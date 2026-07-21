@@ -1,83 +1,113 @@
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy import interpolate
+import scipy.signal as signal
+import matplotlib.pyplot as plt
 
-def plot_tactile_signals(log_data, wall_x):
-    time = np.array(log_data['time'])
-    pos_x = np.array(log_data['pos_x'])
-    pos_y = np.array(log_data['pos_y'])
-    vel_y = np.array(log_data['vel_y'])
-    force_x = np.array(log_data['force_x'])
-    force_y = np.array(log_data['force_y'])
+def plot_tactile_signals(logs, surface_wall_x=0.3, target_freq=80):
+    """
+    Renders the 3-panel Cutaneous & Kinesthetic Signal Dashboard.
+    Uses Ensemble Averaging across individual passes to eliminate boundary phase jumps.
+    """
+    # ---------------------------------------------------------
+    # 1. Unpack logs from simulation
+    # ---------------------------------------------------------
+    time = np.array(logs['time'])
+    pos_x = np.array(logs['pos_x'])
+    pos_y = np.array(logs['pos_y'])
+    vel_y = np.array(logs['vel_y'])
+    Fx = np.array(logs['force_x'])
+    Fy = np.array(logs['force_y'])
 
-    fig, axs = plt.subplots(3, 1, figsize=(12, 9))
-    fig.suptitle('Cutaneous & Kinesthetic Signal Analysis Dashboard', fontsize=14, fontweight='bold')
+    # ---------------------------------------------------------
+    # 2. Extract Individual Forward Passes (v_y > 0)
+    # ---------------------------------------------------------
+    is_fwd = (vel_y > 0.0)
+    padded = np.pad(is_fwd.astype(int), (1, 1), 'constant')
+    diffs = np.diff(padded)
+    starts = np.where(diffs == 1)[0]
+    ends = np.where(diffs == -1)[0]
 
-    t_max = time[-1] if len(time) > 0 else 10.0
+    # Target exact physical aperture [-0.025m, +0.025m] (L = 0.050m)
+    y_start, y_end = -0.025, 0.025
+    L_pass = y_end - y_start
+    pts_per_pass = 1000
+    y_grid = np.linspace(y_start, y_end, pts_per_pass)
+    spatial_fs = pts_per_pass / L_pass  # 20,000 samples/m
 
-    # Panel 1: Position Tracking (Time Domain)
-    axs[0].plot(time, pos_x, color='#1f77b4', linewidth=1.5, label='Pos X (Depth)')
-    axs[0].plot(time, pos_y, color='#ff7f0e', linewidth=1.5, label='Pos Y (Sliding)')
-    axs[0].axhline(y=wall_x, color='red', linestyle='--', linewidth=1.2, label=f'Surface Wall ({wall_x}m)')
-    axs[0].set_xlim([0, t_max])
-    axs[0].set_ylabel('Position (m)')
-    axs[0].set_title('End-Effector Trajectory')
-    axs[0].grid(True, alpha=0.3)
-    axs[0].legend(loc='upper right')
+    n_fft = 4096
+    pass_spectra = []
 
-    # Panel 2: Force Modulation (Time Domain)
-    axs[1].plot(time, force_x, color='#1f77b4', alpha=0.7, label='Fx: Normal Force (Stiffness)')
-    axs[1].plot(time, force_y, color='#2ca02c', linewidth=1.2, label='Fy: Tangential Force (Texture + Friction)')
-    axs[1].set_xlim([0, t_max])
-    axs[1].set_xlabel('Time (s)')
-    axs[1].set_ylabel('Force (N)')
-    axs[1].set_title('Force Signals (Cutaneous Friction Modulation)')
-    axs[1].grid(True, alpha=0.3)
-    axs[1].legend(loc='upper right')
+    for s_idx, e_idx in zip(starts, ends):
+        if (e_idx - s_idx) > 10:
+            y_pass = pos_y[s_idx:e_idx]
+            Fy_pass = Fy[s_idx:e_idx]
 
-    # --- PANEL 3: CUMULATIVE SPATIAL DOMAIN FFT ---
-    # 1. Filter data to active sliding contact regions (vel_y > 0.005 m/s, X near wall)
-    surface_contact_x = wall_x - 0.015  # Account for 1.5 cm tip radius
-    contact_mask = (np.abs(vel_y) > 0.005) & (pos_x >= surface_contact_x - 0.002)
+            # Ensure pass spans the physical window
+            if np.min(y_pass) <= y_start and np.max(y_pass) >= y_end:
+                mask = (y_pass >= y_start) & (y_pass <= y_end)
+                y_sub = y_pass[mask]
+                Fy_sub = Fy_pass[mask]
 
-    pos_y_c = pos_y[contact_mask]
-    force_y_c = force_y[contact_mask]
+                # Resample onto uniform grid
+                Fy_interp = np.interp(y_grid, y_sub, Fy_sub)
 
-    if len(pos_y_c) > 100:
-        # 2. Compute Cumulative Spatial Path: s(t) = sum(|delta_y|)
-        # This unwraps back-and-forth oscillations into a continuous total distance traveled
-        dy_steps = np.abs(np.diff(pos_y_c, prepend=pos_y_c[0]))
-        s_path = np.cumsum(dy_steps)  # Monotonically increasing distance (0 to multi-meters)
+                # High-pass filter (> 20 cycles/m) to cut friction baseline
+                Fy_detrend = Fy_interp - np.mean(Fy_interp)
+                b, a = signal.butter(4, 20.0 / (0.5 * spatial_fs), btype='high')
+                Fy_filtered = signal.filtfilt(b, a, Fy_detrend)
 
-        # 3. Remove non-unique spatial step duplicates for clean interpolation
-        s_path, unique_indices = np.unique(s_path, return_index=True)
-        force_y_c = force_y_c[unique_indices]
+                # Window function
+                window = np.hanning(len(Fy_filtered))
+                Fy_windowed = Fy_filtered * window
 
-        # 4. Resample onto a uniform spatial grid (dy = 0.5 mm = 0.0005 m)
-        dy = 0.0005  
-        s_uniform = np.arange(s_path[0], s_path[-1], dy)
+                # Pass FFT
+                fft_mag = np.abs(np.fft.rfft(Fy_windowed, n=n_fft))
+                pass_spectra.append(fft_mag)
 
-        interp_func = interpolate.interp1d(s_path, force_y_c, kind='linear')
-        f_spatial = interp_func(s_uniform)
-
-        # 5. Zero-padded FFT for fine frequency bin density
-        N_pad = 8192  # High-density zero-padding
-        f_spatial_detrended = f_spatial - np.mean(f_spatial)
-        spatial_fft = np.abs(np.fft.rfft(f_spatial_detrended, n=N_pad))
-        spatial_freqs = np.fft.rfftfreq(N_pad, d=dy)  # Output in cycles/meter
-
-        # Plot Spatial Spectrum
-        axs[2].plot(spatial_freqs, spatial_fft, color='#d62728', linewidth=1.5, label='Spatial Power Spectrum')
-        axs[2].axvline(x=80.0, color='black', linestyle=':', linewidth=1.5, label='True Texture Frequency (80 cycles/m)')
-        axs[2].set_xlim([0, 200])  # Focus on 0 - 200 cycles/meter
-        axs[2].set_xlabel('Spatial Frequency (cycles / meter)')
-        axs[2].set_ylabel('Magnitude')
-        axs[2].set_title('Spatial Domain Spectrum (Cumulative Distance Path)')
-        axs[2].grid(True, alpha=0.3)
-        axs[2].legend(loc='upper right')
+    # ---------------------------------------------------------
+    # 3. Ensemble Average
+    # ---------------------------------------------------------
+    if len(pass_spectra) > 0:
+        mean_spectrum = np.mean(pass_spectra, axis=0)
+        spatial_freqs = np.fft.rfftfreq(n_fft, d=1.0/spatial_fs)
+        fft_mag_scaled = (2.0 / pts_per_pass) * mean_spectrum
     else:
-        axs[2].text(0.5, 0.5, 'Insufficient Contact Data for Spatial Resampling', 
-                     horizontalalignment='center', verticalalignment='center', transform=axs[2].transAxes)
+        spatial_freqs = np.linspace(0, 200, 100)
+        fft_mag_scaled = np.zeros_like(spatial_freqs)
 
-    plt.tight_layout()
+    # ---------------------------------------------------------
+    # 4. Dashboard Rendering
+    # ---------------------------------------------------------
+    fig, axs = plt.subplots(3, 1, figsize=(12, 9), sharex=False, constrained_layout=True)
+    fig.suptitle("Cutaneous & Kinesthetic Signal Analysis Dashboard", fontsize=14, fontweight='bold')
+
+    # --- Panel 1: Trajectory ---
+    axs[0].set_title("End-Effector Trajectory", fontsize=11, fontweight='semibold')
+    axs[0].plot(time, pos_x, label="Pos X (Depth)", color="tab:blue")
+    axs[0].plot(time, pos_y, label="Pos Y (Sliding)", color="tab:orange")
+    axs[0].axhline(y=surface_wall_x, color="tab:red", linestyle="--", label=f"Surface Wall ({surface_wall_x}m)")
+    axs[0].set_ylabel("Position (m)")
+    axs[0].set_xlim([time[0], time[-1]])
+    axs[0].grid(True, alpha=0.3)
+    axs[0].legend(loc="upper right")
+
+    # --- Panel 2: Force Signals ---
+    axs[1].set_title("Force Signals (Cutaneous Friction Modulation)", fontsize=11, fontweight='semibold')
+    axs[1].plot(time, Fx, label="Fx: Normal Force (Stiffness)", color="tab:blue", alpha=0.8)
+    axs[1].plot(time, Fy, label="Fy: Tangential Force (Texture + Friction)", color="tab:green", alpha=0.8)
+    axs[1].set_xlabel("Time (s)")
+    axs[1].set_ylabel("Force (N)")
+    axs[1].set_xlim([time[0], time[-1]])
+    axs[1].grid(True, alpha=0.3)
+    axs[1].legend(loc="upper right")
+
+    # --- Panel 3: Ensemble Averaged Spatial Spectrum ---
+    axs[2].set_title("Spatial Domain Spectrum (Pass-Ensemble Averaged Recovery)", fontsize=11, fontweight='semibold')
+    axs[2].plot(spatial_freqs, fft_mag_scaled, color="tab:red", label="Ensemble Power Spectrum")
+    axs[2].axvline(x=target_freq, color="black", linestyle=":", linewidth=2, label=f"True Texture Frequency ({target_freq} cycles/m)")
+    axs[2].set_xlabel("Spatial Frequency (cycles / meter)")
+    axs[2].set_ylabel("Magnitude")
+    axs[2].set_xlim([0, 200])
+    axs[2].grid(True, alpha=0.3)
+    axs[2].legend(loc="upper right")
+
     plt.show()
