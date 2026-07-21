@@ -1,0 +1,76 @@
+<mujoco model="2dof_multimodal_tactile_device">
+    <compiler angle="degree" coordinate="local" inertiafromgeom="true"/>
+    <option gravity="0 0 -9.81" timestep="0.001"/> <!-- 1kHz real-time loop -->
+
+    <asset>
+        <texture name="grid" type="2d" builtin="checker" width="512" height="512" 
+                 rgb1="0.9 0.9 0.9" rgb2="0.7 0.7 0.7"/>
+        <material name="grid_mat" texture="grid" texrepeat="5 5" reflectance="0.1"/>
+        <material name="link_mat" rgba="0.2 0.5 0.8 1"/>
+        <material name="effector_mat" rgba="0.9 0.2 0.2 1"/>
+        
+        <!-- Surface Material Definitions -->
+        <material name="enamel_mat" rgba="0.9 0.9 0.9 1"/> <!-- Smooth Enamel -->
+        <material name="decay_mat" rgba="0.4 0.3 0.2 1"/>  <!-- Rough Decay -->
+        <material name="tissue_mat" rgba="0.8 0.3 0.4 1"/> <!-- Soft/Sticky Tissue -->
+    </asset>
+
+    <worldbody>
+        <geom name="floor" type="plane" size="1 1 0.1" material="grid_mat"/>
+
+        <!-- Multi-Texture Surface Array (X_boundary = 0.25m) -->
+        <!-- Material 1: Smooth Enamel -->
+        <body name="surface_enamel" pos="0.35 0.10 0.1">
+            <geom name="geom_enamel" type="box" size="0.05 0.05 0.1" material="enamel_mat" 
+                  friction="0.1 0.005 0.0001"/>
+        </body>
+        
+        <!-- Material 2: Rough Cavity Decay -->
+        <body name="surface_decay" pos="0.35 0.0 0.1">
+            <geom name="geom_decay" type="box" size="0.05 0.05 0.1" material="decay_mat" 
+                  contype="1" conaffinity="1" friction="0.7 0.005 0.0001"/>
+        </body>
+
+        <!-- Material 3: Soft/Sticky Tissue -->
+        <body name="surface_tissue" pos="0.35 -0.10 0.1">
+            <geom name="geom_tissue" type="box" size="0.05 0.05 0.1" material="tissue_mat" 
+                  friction="0.9 0.005 0.0001"/>
+        </body>
+
+        <!-- Base of the Haptic Stylus -->
+        <body name="base" pos="0 0 0.1">
+            <geom type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.3 1"/>
+
+            <body name="link1" pos="0 0 0">
+                <joint name="joint1" type="hinge" axis="0 0 1" range="-120 120" damping="0.05"/>
+                <geom type="capsule" fromto="0 0 0  0.2 0 0" size="0.015" material="link_mat"/>
+
+                <body name="link2" pos="0.2 0 0">
+                    <joint name="joint2" type="hinge" axis="0 0 1" range="-150 150" damping="0.05"/>
+                    <geom type="capsule" fromto="0 0 0  0.2 0 0" size="0.012" material="link_mat"/>
+
+                    <body name="end_effector" pos="0.2 0 0">
+                        <geom name="stylus_tip" type="sphere" size="0.015" material="effector_mat" 
+                              contype="1" conaffinity="1" friction="0.5 0.005 0.0001"/>
+                        <site name="tip_site" pos="0 0 0" size="0.005" rgba="1 1 0 1"/>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <motor name="torque_j1" joint="joint1" gear="1" ctrllimited="true" ctrlrange="-8.0 8.0"/>
+        <motor name="torque_j2" joint="joint2" gear="1" ctrllimited="true" ctrlrange="-8.0 8.0"/>
+    </actuator>
+
+    <sensor>
+        <jointpos name="j1_pos" joint="joint1"/>
+        <jointvel name="j1_vel" joint="joint1"/>
+        <jointpos name="j2_pos" joint="joint2"/>
+        <jointvel name="j2_vel" joint="joint2"/>
+        <framepos name="ee_pos" objtype="site" objname="tip_site"/>
+        <framelinvel name="ee_vel" objtype="site" objname="tip_site"/>
+        <touch name="tip_contact_force" site="tip_site"/>
+    </sensor>
+</mujoco>
